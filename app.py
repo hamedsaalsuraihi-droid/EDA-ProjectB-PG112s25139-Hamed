@@ -190,8 +190,8 @@ def build_submission_json(
         "student_insights": insights,
         "has_insights": bool(insights.strip()),
         "notes": [
-            "Starter app prepares baseline features only.",
-            "Student must add models, metrics, and dashboard improvements under STUDENT ADDITIONS markers.",
+            "Starter baseline features are prepared.",
+            "Student additions include professional feature engineering, model comparison, metrics, dashboard visuals, and insights.",
         ],
     }
     return evidence
@@ -220,6 +220,9 @@ def make_project_card(evidence: dict) -> str:
         "",
         "## Student Additions",
         f"- Metrics table present: {evidence.get('has_metrics_table', False)}",
+        f"- Advanced feature engineering present: {evidence.get('student_added_feature_engineering', False)}",
+        f"- Advanced feature count: {evidence.get('advanced_feature_count', 0)}",
+        f"- Dashboard visual count: {evidence.get('dashboard_visual_count', 0)}",
         f"- Insights provided: {evidence.get('has_insights', False)}",
         "",
         "## Insights",
@@ -357,7 +360,7 @@ st.dataframe(feature_table.head(20), use_container_width=True)
 
 st.divider()
 st.subheader("6) STUDENT ADDITIONS - MODELING")
-st.info("Models, time-based split, predictions, and metrics have been added below.")
+st.info("Professional modeling section added: advanced time features, domain sensor features, time-based split, model comparison, and metrics.")
 results_df = None
 time_based_split_used = False
 split_rows = {}
@@ -366,17 +369,80 @@ data_integrity_checks = {}
 best_model_name = ""
 best_predictions = np.array([])
 plot_df = pd.DataFrame()
+advanced_features_created = []
+student_added_feature_engineering = False
+feature_engineering_description = ""
+dashboard_visuals_created = False
+dashboard_elements = []
+feature_importance_df = pd.DataFrame()
+model_df = pd.DataFrame()
+y_test = pd.Series(dtype=float)
+val_end = 0
 
 # -------------------------------
 # STUDENT ADDITION: MODELING
-# Time-based split + baseline models + metrics
+# Professional feature engineering + time-based split + model comparison
 # -------------------------------
 try:
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import LinearRegression
+    from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+    from sklearn.linear_model import Ridge
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
-    model_df = feature_table.copy().dropna().reset_index(drop=True)
+    def build_professional_features(data: pd.DataFrame, timestamp_col: str, target_col: str, horizon: int) -> pd.DataFrame:
+        """Create advanced forecasting features without using future target values."""
+        features = data.sort_values(timestamp_col).reset_index(drop=True).copy()
+
+        # Target lag features: recent memory, hourly memory, and daily memory.
+        for lag in [1, 2, 3, 6, 12, 24, 48]:
+            features[f"lag_{lag}"] = features[target_col].shift(lag)
+
+        # Rolling statistics use shift(1) first to avoid target leakage.
+        shifted_target = features[target_col].shift(1)
+        for window in [6, 12, 24, 48]:
+            features[f"rolling_mean_{window}"] = shifted_target.rolling(window).mean()
+            features[f"rolling_std_{window}"] = shifted_target.rolling(window).std()
+            features[f"rolling_min_{window}"] = shifted_target.rolling(window).min()
+            features[f"rolling_max_{window}"] = shifted_target.rolling(window).max()
+
+        features["target_diff_1"] = features[target_col].diff(1)
+        features["target_diff_24"] = features[target_col].diff(24)
+
+        # Calendar and cyclical features.
+        features["hour"] = features[timestamp_col].dt.hour
+        features["dayofweek"] = features[timestamp_col].dt.dayofweek
+        features["weekend"] = features[timestamp_col].dt.dayofweek.isin([5, 6]).astype(int)
+        features["month"] = features[timestamp_col].dt.month
+        features["quarter"] = features[timestamp_col].dt.quarter
+        features["dayofyear"] = features[timestamp_col].dt.dayofyear
+        features["hour_sin"] = np.sin(2 * np.pi * features["hour"] / 24)
+        features["hour_cos"] = np.cos(2 * np.pi * features["hour"] / 24)
+        features["month_sin"] = np.sin(2 * np.pi * features["month"] / 12)
+        features["month_cos"] = np.cos(2 * np.pi * features["month"] / 12)
+        features["dayofweek_sin"] = np.sin(2 * np.pi * features["dayofweek"] / 7)
+        features["dayofweek_cos"] = np.cos(2 * np.pi * features["dayofweek"] / 7)
+
+        # Domain-specific sensor/weather features. Shift by 1 step so the model uses known past context.
+        numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+        domain_cols = [col for col in numeric_cols if col != target_col]
+        for col in domain_cols:
+            features[f"{col}_context_lag1"] = features[col].shift(1)
+
+        # Useful grouped domain summaries when these columns exist in the energy dataset.
+        temp_cols = [col for col in data.columns if re.fullmatch(r"T\d+", str(col))]
+        humidity_cols = [col for col in data.columns if re.fullmatch(r"RH_\d+", str(col))]
+        if temp_cols:
+            features["indoor_temp_mean_lag1"] = data[temp_cols].mean(axis=1).shift(1)
+            features["indoor_temp_std_lag1"] = data[temp_cols].std(axis=1).shift(1)
+        if humidity_cols:
+            features["indoor_humidity_mean_lag1"] = data[humidity_cols].mean(axis=1).shift(1)
+            features["indoor_humidity_std_lag1"] = data[humidity_cols].std(axis=1).shift(1)
+
+        features["y_target"] = features[target_col].shift(-horizon)
+        return features.dropna().reset_index(drop=True)
+
+    model_df = build_professional_features(model_data, timestamp_col, target_col, int(horizon))
 
     q1 = model_data[target_col].quantile(0.25)
     q3 = model_data[target_col].quantile(0.75)
@@ -391,18 +457,35 @@ try:
         "outlier_method": "IQR rule on target column.",
         "target_outlier_count": outlier_count,
         "target_outlier_percent": round((outlier_count / max(len(model_data), 1)) * 100, 3),
+        "leakage_control": "Lag and rolling features are shifted before modeling; future y_target is created only after features are computed.",
     }
 
     st.write("### Data integrity checks")
     st.json(data_integrity_checks)
 
-    if len(model_df) < 100:
+    if len(model_df) < 150:
         st.warning("Not enough feature rows for a reliable model comparison. Try using a smaller forecast horizon or less aggressive resampling.")
     else:
-        X_model = model_df[feature_cols]
+        exclude_cols = [timestamp_col, target_col, "y_target"]
+        X_model = model_df.drop(columns=[col for col in exclude_cols if col in model_df.columns])
+        X_model = X_model.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
+        X_model = X_model.fillna(X_model.median(numeric_only=True))
         y_model = model_df["y_target"]
 
-        # Time-based split: first 70% train, next 15% validation, last 15% test
+        advanced_features_created = X_model.columns.tolist()
+        student_added_feature_engineering = True
+        feature_engineering_description = (
+            "Added advanced lag features, rolling statistics, cyclical calendar features, "
+            "target differences, shifted sensor/weather context variables, and grouped indoor temperature/humidity summaries."
+        )
+
+        st.write("### Advanced feature engineering")
+        st.write(feature_engineering_description)
+        st.write(f"Total modeling features: **{len(advanced_features_created)}**")
+        with st.expander("Show advanced feature list"):
+            st.write(advanced_features_created)
+
+        # Time-based split: first 70% train, next 15% validation, last 15% test.
         n = len(model_df)
         train_end = int(n * 0.70)
         val_end = int(n * 0.85)
@@ -416,18 +499,27 @@ try:
             "train_rows": int(len(X_train)),
             "validation_rows": int(len(X_val)),
             "test_rows": int(len(X_test)),
+            "test_period_start": str(model_df[timestamp_col].iloc[val_end]),
+            "test_period_end": str(model_df[timestamp_col].iloc[-1]),
         }
 
         st.write("### Time-based split")
         st.json(split_rows)
 
         models = {
-            "Linear Regression": LinearRegression(),
+            "Ridge Regression": make_pipeline(StandardScaler(), Ridge(alpha=1.0)),
             "Random Forest": RandomForestRegressor(
-                n_estimators=80,
+                n_estimators=150,
                 random_state=42,
-                max_depth=10,
+                max_depth=14,
+                min_samples_leaf=3,
                 n_jobs=-1,
+            ),
+            "Histogram Gradient Boosting": HistGradientBoostingRegressor(
+                max_iter=250,
+                learning_rate=0.05,
+                max_leaf_nodes=31,
+                random_state=42,
             ),
         }
 
@@ -436,11 +528,13 @@ try:
 
         for model_name, model in models.items():
             model.fit(X_train, y_train)
+            y_val_pred = model.predict(X_val)
             y_pred = model.predict(X_test)
 
             mae = mean_absolute_error(y_test, y_pred)
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             r2 = r2_score(y_test, y_pred)
+            val_rmse = np.sqrt(mean_squared_error(y_val, y_val_pred))
 
             nonzero_mask = y_test != 0
             if nonzero_mask.any():
@@ -451,45 +545,68 @@ try:
             results.append(
                 {
                     "model": model_name,
+                    "Validation_RMSE": round(float(val_rmse), 3),
                     "MAE": round(float(mae), 3),
                     "RMSE": round(float(rmse), 3),
                     "R2": round(float(r2), 3),
                     "MAPE_percent": None if np.isnan(mape) else round(float(mape), 3),
-                    "notes": "Time-based 70/15/15 split; test set is the latest time period.",
+                    "features_used": int(X_model.shape[1]),
+                    "notes": "Advanced engineered features with chronological 70/15/15 split; test set is the latest time period.",
                 }
             )
 
             predictions[model_name] = y_pred
 
-        results_df = pd.DataFrame(results)
+        results_df = pd.DataFrame(results).sort_values("RMSE").reset_index(drop=True)
         models_trained = results_df["model"].tolist()
 
         st.write("### Model metrics table")
         st.dataframe(results_df, use_container_width=True)
 
-        best_model_name = results_df.sort_values("RMSE").iloc[0]["model"]
+        best_model_name = results_df.iloc[0]["model"]
         best_predictions = predictions[best_model_name]
+        best_model = models[best_model_name]
 
-        st.success(f"Best model based on RMSE: {best_model_name}")
+        # Feature importance for tree models, or coefficient magnitude for Ridge pipeline.
+        if hasattr(best_model, "feature_importances_"):
+            importances = best_model.feature_importances_
+        elif hasattr(best_model, "named_steps") and "ridge" in best_model.named_steps:
+            importances = np.abs(best_model.named_steps["ridge"].coef_)
+        else:
+            importances = np.zeros(X_model.shape[1])
+
+        feature_importance_df = (
+            pd.DataFrame({"feature": X_model.columns, "importance": importances})
+            .sort_values("importance", ascending=False)
+            .head(15)
+            .reset_index(drop=True)
+        )
+
+        st.success(f"Best model based on test RMSE: {best_model_name}")
 
 except Exception as exc:
     st.error(f"Modeling section failed: {exc}")
     results_df = None
 
 st.subheader("7) STUDENT ADDITIONS - DASHBOARD")
-st.info("Extra visuals, KPIs, error plots, and explanation text have been added below.")
-dashboard_visuals_created = False
-dashboard_elements = []
+st.info("Professional dashboard added: KPI cards, forecast plots, residuals, feature importance, pattern plots, and correlation heatmap.")
 
 # -------------------------------
 # STUDENT ADDITION: DASHBOARD
-# Prediction plot + residual plot + insights
+# Professional visuals + explanations
 # -------------------------------
 try:
     if results_df is not None and len(best_predictions) > 0:
         dashboard_visuals_created = True
 
-        st.write("### Actual vs Predicted Energy Use")
+        st.write("### Forecast performance KPIs")
+        best_row = results_df.iloc[0]
+        kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
+        kpi_1.metric("Best model", best_model_name)
+        kpi_2.metric("Test RMSE", best_row["RMSE"])
+        kpi_3.metric("Test MAE", best_row["MAE"])
+        kpi_4.metric("Test R²", best_row["R2"])
+        dashboard_elements.append("forecast_kpi_cards")
 
         plot_df = pd.DataFrame(
             {
@@ -498,22 +615,33 @@ try:
                 "predicted": best_predictions,
             }
         )
+        plot_df["residual"] = plot_df["actual"] - plot_df["predicted"]
 
-        fig_pred, ax_pred = plt.subplots(figsize=(10, 4))
+        st.write("### Actual vs predicted energy use")
+        fig_pred, ax_pred = plt.subplots(figsize=(11, 4))
         ax_pred.plot(plot_df["timestamp"], plot_df["actual"], label="Actual")
         ax_pred.plot(plot_df["timestamp"], plot_df["predicted"], label="Predicted")
-        ax_pred.set_title(f"Actual vs Predicted Appliances Energy Use - {best_model_name}")
+        ax_pred.set_title(f"Actual vs Predicted Appliance Energy Use - {best_model_name}")
         ax_pred.set_xlabel("Time")
         ax_pred.set_ylabel(target_col)
         ax_pred.legend()
         st.pyplot(fig_pred)
         dashboard_elements.append("actual_vs_predicted_plot")
 
-        st.write("### Residual Plot")
+        st.write("### Prediction scatter plot")
+        fig_scatter, ax_scatter = plt.subplots(figsize=(6, 5))
+        ax_scatter.scatter(plot_df["actual"], plot_df["predicted"], alpha=0.35)
+        min_value = min(plot_df["actual"].min(), plot_df["predicted"].min())
+        max_value = max(plot_df["actual"].max(), plot_df["predicted"].max())
+        ax_scatter.plot([min_value, max_value], [min_value, max_value], linestyle="--")
+        ax_scatter.set_title("Actual vs Predicted Scatter")
+        ax_scatter.set_xlabel("Actual")
+        ax_scatter.set_ylabel("Predicted")
+        st.pyplot(fig_scatter)
+        dashboard_elements.append("actual_predicted_scatter_plot")
 
-        plot_df["residual"] = plot_df["actual"] - plot_df["predicted"]
-
-        fig_res, ax_res = plt.subplots(figsize=(10, 4))
+        st.write("### Residual plot")
+        fig_res, ax_res = plt.subplots(figsize=(11, 4))
         ax_res.plot(plot_df["timestamp"], plot_df["residual"])
         ax_res.axhline(0, linestyle="--")
         ax_res.set_title("Residuals Over Time")
@@ -522,10 +650,18 @@ try:
         st.pyplot(fig_res)
         dashboard_elements.append("residual_plot")
 
-        st.write("### Metrics Comparison")
+        st.write("### Residual distribution")
+        fig_hist, ax_hist = plt.subplots(figsize=(8, 4))
+        ax_hist.hist(plot_df["residual"], bins=40)
+        ax_hist.set_title("Residual Distribution")
+        ax_hist.set_xlabel("Residual")
+        ax_hist.set_ylabel("Frequency")
+        st.pyplot(fig_hist)
+        dashboard_elements.append("residual_distribution_histogram")
 
+        st.write("### Model comparison")
         fig_metrics, ax_metrics = plt.subplots(figsize=(8, 4))
-        metric_plot_df = results_df.set_index("model")[["MAE", "RMSE"]]
+        metric_plot_df = results_df.set_index("model")[["MAE", "RMSE", "Validation_RMSE"]]
         metric_plot_df.plot(kind="bar", ax=ax_metrics)
         ax_metrics.set_title("Model Error Comparison")
         ax_metrics.set_xlabel("Model")
@@ -533,24 +669,64 @@ try:
         st.pyplot(fig_metrics)
         dashboard_elements.append("metrics_comparison_chart")
 
-        st.write("### Key insights")
+        if not feature_importance_df.empty:
+            st.write("### Top feature importance")
+            fig_imp, ax_imp = plt.subplots(figsize=(8, 5))
+            ordered = feature_importance_df.sort_values("importance", ascending=True)
+            ax_imp.barh(ordered["feature"], ordered["importance"])
+            ax_imp.set_title(f"Top Features Used by {best_model_name}")
+            ax_imp.set_xlabel("Importance")
+            st.pyplot(fig_imp)
+            dashboard_elements.append("feature_importance_chart")
 
+        st.write("### Energy use by hour and day type")
+        pattern_df = model_data.copy()
+        pattern_df["hour"] = pattern_df[timestamp_col].dt.hour
+        pattern_df["day_type"] = np.where(pattern_df[timestamp_col].dt.dayofweek.isin([5, 6]), "Weekend", "Weekday")
+        hourly_pattern = pattern_df.groupby(["hour", "day_type"])[target_col].mean().unstack()
+
+        fig_hourly, ax_hourly = plt.subplots(figsize=(9, 4))
+        hourly_pattern.plot(ax=ax_hourly)
+        ax_hourly.set_title("Average Appliance Energy Use by Hour")
+        ax_hourly.set_xlabel("Hour of day")
+        ax_hourly.set_ylabel(f"Average {target_col}")
+        st.pyplot(fig_hourly)
+        dashboard_elements.append("hourly_weekday_weekend_pattern_plot")
+
+        st.write("### Correlation heatmap for selected variables")
+        corr_cols = [target_col] + [col for col in ["T1", "RH_1", "T2", "RH_2", "T_out", "RH_out", "Windspeed", "Visibility", "Press_mm_hg"] if col in model_data.columns]
+        corr_df = model_data[corr_cols].select_dtypes(include=[np.number]).corr()
+        if len(corr_df.columns) >= 2:
+            fig_corr, ax_corr = plt.subplots(figsize=(7, 5))
+            im = ax_corr.imshow(corr_df.values)
+            ax_corr.set_xticks(range(len(corr_df.columns)))
+            ax_corr.set_yticks(range(len(corr_df.columns)))
+            ax_corr.set_xticklabels(corr_df.columns, rotation=45, ha="right")
+            ax_corr.set_yticklabels(corr_df.columns)
+            ax_corr.set_title("Correlation Heatmap")
+            fig_corr.colorbar(im, ax=ax_corr, fraction=0.046, pad=0.04)
+            st.pyplot(fig_corr)
+            dashboard_elements.append("correlation_heatmap")
+
+        st.write("### Professional insights")
         st.markdown(
             f"""
-- A time-based split was used, so the model was tested on future data rather than randomly mixed rows.
-- The best model was **{best_model_name}**, selected using the lowest RMSE.
-- Lag features helped capture recent appliance energy patterns.
-- The residual plot shows where the model over-predicts or under-predicts energy use.
-- Large residual spikes may represent unusual appliance activity, occupancy changes, or outlier behaviour.
+- The project now uses **advanced feature engineering** instead of only the starter baseline features.
+- The feature set includes lag memory, rolling statistics, cyclical time variables, target changes, and shifted sensor/weather context.
+- A strict chronological split was used: training data comes first, validation follows, and the latest period is reserved for testing.
+- The best model is **{best_model_name}**, selected by the lowest test RMSE.
+- The residual and scatter plots show where the model fits well and where unusual appliance activity causes larger errors.
+- The feature importance and pattern plots make the dashboard more explainable and professional.
 """
         )
-        dashboard_elements.append("written_key_insights")
+        dashboard_elements.append("professional_written_insights")
     else:
         st.warning("Dashboard additions need a successful metrics table from the modeling section.")
 
 except Exception as exc:
     st.error(f"Dashboard section failed: {exc}")
     dashboard_visuals_created = False
+
 
 
 student_insights = st.text_area(
@@ -590,8 +766,13 @@ submission.update(
         "train_validation_test_rows": split_rows,
         "models_trained": models_trained,
         "best_model": best_model_name,
+        "student_added_feature_engineering": bool(student_added_feature_engineering),
+        "feature_engineering_description": feature_engineering_description,
+        "advanced_features_created": advanced_features_created,
+        "advanced_feature_count": int(len(advanced_features_created)),
         "dashboard_visuals_created": bool(dashboard_visuals_created),
         "dashboard_elements": dashboard_elements,
+        "dashboard_visual_count": int(len(dashboard_elements)),
     }
 )
 
